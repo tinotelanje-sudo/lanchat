@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Send, User, MessageSquare, Clock, Users, ChevronRight, Sparkles, Loader2 } from 'lucide-react';
+import { Send, User, MessageSquare, Clock, Users, ChevronRight, Sparkles, Loader2, Smile } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 
@@ -10,9 +10,12 @@ interface Message {
   timestamp: string;
   id: string;
   isAI?: boolean;
+  reactions: Record<string, string[]>; // emoji -> list of usernames
 }
 
 const socket: Socket = io();
+
+const COMMON_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '👏', '🎉'];
 
 // Initialize Gemini AI
 const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
@@ -25,20 +28,43 @@ export default function App() {
   const [isUsernameSet, setIsUsernameSet] = useState(false);
   const [showUserList, setShowUserList] = useState(false);
   const [isAiLoading, setIsAiLoading] = useState(false);
+  const [activeEmojiPicker, setActiveEmojiPicker] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     socket.on('receive_message', (data: Message) => {
-      setMessages((prev) => [...prev, data]);
+      setMessages((prev) => [...prev, { ...data, reactions: data.reactions || {} }]);
     });
 
     socket.on('update_user_list', (users: string[]) => {
       setConnectedUsers(users);
     });
 
+    socket.on('update_reaction', ({ messageId, emoji, username: reactorName }) => {
+      setMessages((prev) => prev.map(msg => {
+        if (msg.id === messageId) {
+          const currentReactions = { ...msg.reactions };
+          const usersForEmoji = currentReactions[emoji] || [];
+          
+          if (usersForEmoji.includes(reactorName)) {
+            // Remove reaction if already exists
+            currentReactions[emoji] = usersForEmoji.filter(u => u !== reactorName);
+            if (currentReactions[emoji].length === 0) delete currentReactions[emoji];
+          } else {
+            // Add reaction
+            currentReactions[emoji] = [...usersForEmoji, reactorName];
+          }
+          
+          return { ...msg, reactions: currentReactions };
+        }
+        return msg;
+      }));
+    });
+
     return () => {
       socket.off('receive_message');
       socket.off('update_user_list');
+      socket.off('update_reaction');
     };
   }, []);
 
@@ -65,6 +91,7 @@ export default function App() {
         text: aiText,
         id: Math.random().toString(36).substr(2, 9),
         isAI: true,
+        reactions: {},
       };
       
       socket.emit('send_message', aiMessage);
@@ -74,6 +101,7 @@ export default function App() {
         username: "System",
         text: "Ralat semasa menghubungi AI. Sila cuba lagi.",
         id: Math.random().toString(36).substr(2, 9),
+        reactions: {},
       };
       socket.emit('send_message', errorMessage);
     } finally {
@@ -89,6 +117,7 @@ export default function App() {
         username,
         text,
         id: Math.random().toString(36).substr(2, 9),
+        reactions: {},
       };
       
       socket.emit('send_message', messageData);
@@ -108,6 +137,11 @@ export default function App() {
       setIsUsernameSet(true);
       socket.emit('user_join', username);
     }
+  };
+
+  const handleAddReaction = (messageId: string, emoji: string) => {
+    socket.emit('add_reaction', { messageId, emoji, username });
+    setActiveEmojiPicker(null);
   };
 
   if (!isUsernameSet) {
@@ -233,35 +267,91 @@ export default function App() {
         </AnimatePresence>
 
         {/* Chat Area */}
-        <main className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 max-w-4xl mx-auto w-full scrollbar-hide">
+        <main className="flex-1 overflow-y-auto p-4 md:p-6 space-y-8 max-w-4xl mx-auto w-full scrollbar-hide">
           <AnimatePresence initial={false}>
             {messages.map((msg) => (
               <motion.div
                 key={msg.id}
                 initial={{ opacity: 0, y: 10, scale: 0.95 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                className={`flex flex-col ${msg.username === username ? 'items-end' : 'items-start'}`}
+                className={`flex flex-col group relative ${msg.username === username ? 'items-end' : 'items-start'}`}
               >
                 <div className="flex items-center gap-2 mb-1 px-1">
+                  {msg.isAI && <Sparkles className="w-3 h-3 text-violet-400" />}
                   <span className={`text-xs font-semibold ${msg.isAI ? 'text-violet-400' : 'text-zinc-500'}`}>
                     {msg.username}
+                    {msg.isAI && <span className="ml-1.5 px-1 py-0.5 bg-violet-500/20 border border-violet-500/30 rounded text-[8px] uppercase tracking-tighter">Bot</span>}
                   </span>
                   <span className="text-[10px] text-zinc-600 flex items-center gap-1">
                     <Clock className="w-3 h-3" />
                     {msg.timestamp}
                   </span>
                 </div>
-                <div 
-                  className={`max-w-[85%] md:max-w-[70%] px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm ${
-                    msg.username === username 
-                      ? 'bg-emerald-600 text-white rounded-tr-none' 
-                      : msg.isAI 
-                        ? 'bg-violet-600/20 text-violet-100 border border-violet-500/30 rounded-tl-none'
-                        : 'bg-zinc-900 text-zinc-200 border border-zinc-800 rounded-tl-none'
-                  }`}
-                >
-                  {msg.text}
+                
+                <div className="relative flex items-center gap-2 max-w-full">
+                  {/* Reaction Button (Desktop Hover) */}
+                  <button 
+                    onClick={() => setActiveEmojiPicker(activeEmojiPicker === msg.id ? null : msg.id)}
+                    className={`p-1.5 bg-zinc-900 border border-zinc-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity hover:bg-zinc-800 ${msg.username === username ? 'order-first' : 'order-last'}`}
+                  >
+                    <Smile className="w-4 h-4 text-zinc-500" />
+                  </button>
+
+                  <div 
+                    className={`max-w-[85%] md:max-w-[70%] px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-all ${
+                      msg.username === username 
+                        ? 'bg-emerald-600 text-white rounded-tr-none' 
+                        : msg.isAI 
+                          ? 'bg-gradient-to-br from-violet-600/20 to-fuchsia-600/10 text-violet-100 border border-violet-500/40 rounded-tl-none shadow-lg shadow-violet-900/10'
+                          : 'bg-zinc-900 text-zinc-200 border border-zinc-800 rounded-tl-none'
+                    }`}
+                  >
+                    {msg.text}
+                  </div>
+
+                  {/* Emoji Picker Overlay */}
+                  <AnimatePresence>
+                    {activeEmojiPicker === msg.id && (
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                        className={`absolute bottom-full mb-2 bg-zinc-900 border border-zinc-800 rounded-xl p-2 shadow-2xl z-40 flex gap-1 ${msg.username === username ? 'right-0' : 'left-0'}`}
+                      >
+                        {COMMON_EMOJIS.map(emoji => (
+                          <button
+                            key={emoji}
+                            onClick={() => handleAddReaction(msg.id, emoji)}
+                            className="w-8 h-8 flex items-center justify-center hover:bg-zinc-800 rounded-lg transition-colors text-lg"
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
+
+                {/* Display Reactions */}
+                {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                  <div className={`flex flex-wrap gap-1 mt-1.5 ${msg.username === username ? 'justify-end' : 'justify-start'}`}>
+                    {Object.entries(msg.reactions).map(([emoji, users]) => (
+                      <button
+                        key={emoji}
+                        onClick={() => handleAddReaction(msg.id, emoji)}
+                        title={users.join(', ')}
+                        className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs border transition-all ${
+                          users.includes(username)
+                            ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-500'
+                            : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700'
+                        }`}
+                      >
+                        <span>{emoji}</span>
+                        <span className="font-bold">{users.length}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </motion.div>
             ))}
             {isAiLoading && (

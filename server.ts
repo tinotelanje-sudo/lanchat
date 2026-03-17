@@ -36,7 +36,13 @@ async function startServer() {
       io.emit("receive_message", {
         ...data,
         timestamp: new Date().toLocaleTimeString(),
+        reactions: {},
       });
+    });
+
+    socket.on("add_reaction", ({ messageId, emoji, username }) => {
+      // Broadcast the reaction to all clients
+      io.emit("update_reaction", { messageId, emoji, username });
     });
 
     socket.on("disconnect", () => {
