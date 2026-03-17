@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Send, User, MessageSquare, Clock, Users, ChevronRight, Sparkles, Loader2, Smile, QrCode, X, Smartphone, Video, Phone, PhoneOff, Mic, MicOff, Camera, CameraOff, Paperclip, File, Download } from 'lucide-react';
+import { Send, User, MessageSquare, Clock, Users, ChevronRight, Sparkles, Loader2, Smile, QrCode, X, Smartphone, Video, Phone, PhoneOff, Mic, MicOff, Camera, CameraOff, Paperclip, File, Download, MonitorUp } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { QRCodeSVG } from 'qrcode.react';
+import * as tf from '@tensorflow/tfjs';
+import * as cocoSsd from '@tensorflow-models/coco-ssd';
 
 interface Message {
   username: string;
@@ -46,6 +48,8 @@ export default function App() {
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null);
+  const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
+  const [imageTags, setImageTags] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -53,9 +57,9 @@ export default function App() {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [callState, setCallState] = useState<'idle' | 'calling' | 'receiving' | 'connected'>('idle');
-  const [caller, setCaller] = useState<{ id: string, name: string, signal: RTCSessionDescriptionInit, callType: 'video' | 'voice' } | null>(null);
+  const [caller, setCaller] = useState<{ id: string, name: string, signal: RTCSessionDescriptionInit, callType: 'video' | 'voice' | 'screen' } | null>(null);
   const [activeCallPeer, setActiveCallPeer] = useState<string | null>(null);
-  const [callType, setCallType] = useState<'video' | 'voice'>('video');
+  const [callType, setCallType] = useState<'video' | 'voice' | 'screen'>('video');
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   
@@ -270,6 +274,8 @@ export default function App() {
   const clearFileSelection = () => {
     setSelectedFile(null);
     setFilePreview(null);
+    setImageTags([]);
+    setIsAnalyzingImage(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -366,15 +372,36 @@ export default function App() {
     }
 
     setSelectedFile(file);
+    setImageTags([]);
 
     if (file.type.startsWith('image/')) {
       const reader = new FileReader();
-      reader.onload = (ev) => {
-        setFilePreview(ev.target?.result as string);
+      reader.onload = async (ev) => {
+        const dataUrl = ev.target?.result as string;
+        setFilePreview(dataUrl);
+        
+        // TensorFlow Image Analysis
+        setIsAnalyzingImage(true);
+        try {
+          await tf.ready();
+          const model = await cocoSsd.load();
+          const img = new Image();
+          img.src = dataUrl;
+          img.onload = async () => {
+            const predictions = await model.detect(img);
+            const tags = predictions.map(p => p.class);
+            setImageTags([...new Set(tags)]);
+            setIsAnalyzingImage(false);
+          };
+        } catch (err) {
+          console.error("TF Analysis failed", err);
+          setIsAnalyzingImage(false);
+        }
       };
       reader.readAsDataURL(file);
     } else {
       setFilePreview(null);
+      setIsAnalyzingImage(false);
     }
   };
 
@@ -384,14 +411,19 @@ export default function App() {
   };
 
   // WebRTC Functions
-  const setupMedia = async (type: 'video' | 'voice') => {
+  const setupMedia = async (type: 'video' | 'voice' | 'screen') => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: type === 'video', audio: true });
+      let stream: MediaStream;
+      if (type === 'screen') {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia({ video: type === 'video', audio: true });
+      }
       setLocalStream(stream);
       return stream;
     } catch (err) {
       console.error("Failed to get local stream", err);
-      alert("Sila benarkan akses kamera/mikrofon untuk panggilan.");
+      alert("Sila benarkan akses kamera/mikrofon/skrin untuk panggilan.");
       return null;
     }
   };
@@ -420,7 +452,7 @@ export default function App() {
     return pc;
   };
 
-  const startCall = async (targetId: string, targetName: string, type: 'video' | 'voice') => {
+  const startCall = async (targetId: string, targetName: string, type: 'video' | 'voice' | 'screen') => {
     setCallType(type);
     const stream = await setupMedia(type);
     if (!stream) return;
@@ -696,6 +728,13 @@ export default function App() {
                           >
                             <Video className="w-4 h-4" />
                           </button>
+                          <button
+                            onClick={() => startCall(user.id, user.username, 'screen')}
+                            className="p-2 bg-zinc-800/50 hover:bg-emerald-500/20 text-zinc-500 hover:text-emerald-500 rounded-lg transition-colors"
+                            title="Kongsi Skrin"
+                          >
+                            <MonitorUp className="w-4 h-4" />
+                          </button>
                         </div>
                       )}
                     </motion.div>
@@ -857,28 +896,52 @@ export default function App() {
         </div>
         
         {selectedFile && (
-          <div className="max-w-4xl mx-auto mb-3 p-3 bg-zinc-900 border border-zinc-800 rounded-xl flex items-center justify-between">
-            <div className="flex items-center gap-3 overflow-hidden">
-              {filePreview ? (
-                <img src={filePreview} alt="Preview" className="w-12 h-12 object-cover rounded-lg" />
-              ) : (
-                <div className="w-12 h-12 bg-zinc-800 rounded-lg flex items-center justify-center shrink-0">
-                  <File className="w-6 h-6 text-zinc-400" />
+          <div className="max-w-4xl mx-auto mb-3 p-3 bg-zinc-900 border border-zinc-800 rounded-xl flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3 overflow-hidden">
+                {filePreview ? (
+                  <img src={filePreview} alt="Preview" className="w-12 h-12 object-cover rounded-lg" />
+                ) : (
+                  <div className="w-12 h-12 bg-zinc-800 rounded-lg flex items-center justify-center shrink-0">
+                    <File className="w-6 h-6 text-zinc-400" />
+                  </div>
+                )}
+                <div className="flex flex-col overflow-hidden">
+                  <span className="text-sm font-medium text-zinc-200 truncate">{selectedFile.name}</span>
+                  <span className="text-xs text-zinc-500">{formatFileSize(selectedFile.size)}</span>
                 </div>
-              )}
-              <div className="flex flex-col overflow-hidden">
-                <span className="text-sm font-medium text-zinc-200 truncate">{selectedFile.name}</span>
-                <span className="text-xs text-zinc-500">{formatFileSize(selectedFile.size)}</span>
               </div>
+              <button
+                type="button"
+                onClick={clearFileSelection}
+                className="p-2 text-zinc-500 hover:text-red-400 transition-colors shrink-0"
+                title="Batal"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={clearFileSelection}
-              className="p-2 text-zinc-500 hover:text-red-400 transition-colors shrink-0"
-              title="Batal"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            
+            {/* TensorFlow Analysis UI */}
+            {isAnalyzingImage && (
+              <div className="text-xs text-emerald-500 flex items-center gap-1 mt-1">
+                <Loader2 className="w-3 h-3 animate-spin" /> Menganalisis imej (TensorFlow Lite)...
+              </div>
+            )}
+            {imageTags.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1">
+                <span className="text-[10px] text-zinc-500 flex items-center mr-1">Tag TF:</span>
+                {imageTags.map(tag => (
+                  <button 
+                    key={tag} 
+                    type="button" 
+                    onClick={() => setInputText(prev => prev + (prev ? ' ' : '') + '#' + tag)} 
+                    className="text-[10px] bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full hover:bg-emerald-500/20 transition-colors"
+                  >
+                    #{tag}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -973,10 +1036,10 @@ export default function App() {
               className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 max-w-sm w-full shadow-2xl text-center"
             >
               <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-6 border-4 border-emerald-500/30 animate-pulse">
-                {caller.callType === 'video' ? <Video className="w-10 h-10 text-emerald-500" /> : <Phone className="w-10 h-10 text-emerald-500" />}
+                {caller.callType === 'video' ? <Video className="w-10 h-10 text-emerald-500" /> : caller.callType === 'screen' ? <MonitorUp className="w-10 h-10 text-emerald-500" /> : <Phone className="w-10 h-10 text-emerald-500" />}
               </div>
               <h3 className="text-2xl font-bold text-white mb-2">{caller.name}</h3>
-              <p className="text-zinc-400 mb-8">Panggilan {caller.callType === 'video' ? 'Video' : 'Suara'} Masuk...</p>
+              <p className="text-zinc-400 mb-8">Panggilan {caller.callType === 'video' ? 'Video' : caller.callType === 'screen' ? 'Kongsi Skrin' : 'Suara'} Masuk...</p>
               
               <div className="flex justify-center gap-4">
                 <button
@@ -1001,7 +1064,7 @@ export default function App() {
           <div className="fixed inset-0 z-[60] bg-black flex flex-col">
             <div className="flex-1 relative">
               {/* Remote Video or Voice Avatar */}
-              {callType === 'video' ? (
+              {(callType === 'video' || callType === 'screen') ? (
                 <video
                   ref={remoteVideoRef}
                   autoPlay
@@ -1024,7 +1087,7 @@ export default function App() {
               {callState === 'calling' && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
                   <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mb-6 border-4 border-emerald-500/30 animate-pulse">
-                    {callType === 'video' ? <Video className="w-10 h-10 text-emerald-500" /> : <Phone className="w-10 h-10 text-emerald-500" />}
+                    {callType === 'video' ? <Video className="w-10 h-10 text-emerald-500" /> : callType === 'screen' ? <MonitorUp className="w-10 h-10 text-emerald-500" /> : <Phone className="w-10 h-10 text-emerald-500" />}
                   </div>
                   <h3 className="text-2xl font-bold text-white mb-2">Memanggil...</h3>
                   <p className="text-zinc-400">Menunggu jawapan</p>
@@ -1032,7 +1095,7 @@ export default function App() {
               )}
 
               {/* Local Video (Picture-in-Picture) */}
-              {callType === 'video' && (
+              {(callType === 'video' || callType === 'screen') && (
                 <div className="absolute top-6 right-6 w-32 md:w-48 aspect-[3/4] md:aspect-video bg-zinc-800 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl z-10">
                   <video
                     ref={localVideoRef}
@@ -1065,7 +1128,7 @@ export default function App() {
                   <PhoneOff className="w-6 h-6" />
                 </button>
 
-                {callType === 'video' && (
+                {(callType === 'video' || callType === 'screen') && (
                   <button
                     onClick={toggleVideo}
                     className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isVideoOff ? 'bg-red-500/20 text-red-500' : 'bg-zinc-800 text-white hover:bg-zinc-700'}`}
