@@ -4,6 +4,7 @@ import { Server } from "socket.io";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
+import os from "os";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,9 +16,27 @@ async function startServer() {
     cors: {
       origin: "*",
     },
+    maxHttpBufferSize: 5e7, // 50 MB limit for file uploads
   });
 
   const PORT = 3000;
+
+  // Endpoint to get local IP addresses for LAN connection
+  app.get("/api/network-info", (req, res) => {
+    const interfaces = os.networkInterfaces();
+    const addresses: string[] = [];
+    
+    for (const k in interfaces) {
+      for (const k2 in interfaces[k]) {
+        const address = interfaces[k]![k2];
+        if (address.family === "IPv4" && !address.internal) {
+          addresses.push(address.address);
+        }
+      }
+    }
+    
+    res.json({ ips: addresses, port: PORT });
+  });
 
   // Track connected users: socketId -> username
   const users: Record<string, string> = {};
@@ -28,7 +47,8 @@ async function startServer() {
 
     socket.on("user_join", (username) => {
       users[socket.id] = username;
-      io.emit("update_user_list", Object.values(users));
+      const userList = Object.entries(users).map(([id, name]) => ({ id, username: name }));
+      io.emit("update_user_list", userList);
     });
 
     socket.on("send_message", (data) => {
@@ -45,10 +65,37 @@ async function startServer() {
       io.emit("update_reaction", { messageId, emoji, username });
     });
 
+    // Typing Indicators
+    socket.on("typing", (username) => {
+      socket.broadcast.emit("user_typing", username);
+    });
+
+    socket.on("stop_typing", (username) => {
+      socket.broadcast.emit("user_stop_typing", username);
+    });
+
+    // WebRTC Signaling
+    socket.on("call_user", ({ userToCall, signalData, from, name, callType }) => {
+      io.to(userToCall).emit("incoming_call", { signal: signalData, from, name, callType });
+    });
+
+    socket.on("answer_call", ({ to, signal }) => {
+      io.to(to).emit("call_accepted", signal);
+    });
+
+    socket.on("ice_candidate", ({ to, candidate }) => {
+      io.to(to).emit("ice_candidate", candidate);
+    });
+
+    socket.on("end_call", ({ to }) => {
+      io.to(to).emit("call_ended");
+    });
+
     socket.on("disconnect", () => {
       console.log("User disconnected:", socket.id);
       delete users[socket.id];
-      io.emit("update_user_list", Object.values(users));
+      const userList = Object.entries(users).map(([id, name]) => ({ id, username: name }));
+      io.emit("update_user_list", userList);
     });
   });
 

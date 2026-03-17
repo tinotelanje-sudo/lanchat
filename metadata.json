@@ -1,5 +1,5 @@
 {
   "name": "LAN Messenger",
   "description": "A simple and beautiful local network chat application using Socket.io and Tailwind CSS.",
-  "requestFramePermissions": []
+  "requestFramePermissions": ["camera", "microphone"]
 }
